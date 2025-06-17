@@ -1,0 +1,114 @@
+
+# Perl Code Style Guide: Readability & Portability First
+
+Our goal is to generate Perl code that is not just functional, but **exceptionally clear, easy to understand for humans, and straightforward to translate or port to other modern languages like Python.** This guide outlines the mandatory style preferences to achieve that.
+
+---
+
+## Core Motivations
+
+* **Readability:** Code should be immediately comprehensible, reading almost like a narrative.
+* **Low Cognitive Load:** Minimizing the mental effort required for anyone (or any future AI agent) to grasp the code's logic.
+* **Ease of Translation/Porting:** Favor Perl constructs and patterns that have clear, direct equivalents in languages like Python, simplifying future migrations.
+* **Minimize Dependencies:** Relying on core Perl features reduces setup complexity and increases portability.
+* **Robustness:** Avoiding complex regex patterns prevents common pitfalls with edge cases.
+* **Cross-Platform Compatibility:** Ensure generated code is robust and behaves predictably across Windows, macOS, and Linux environments.
+
+---
+
+## Mandatory Perl Coding Instructions
+
+When generating Perl code, **you MUST strictly adhere to the following guidelines**:
+
+### 1. Be Explicit and Clear (Pythonic Perl)
+
+* **Favor Explicit Constructs**: Always choose explicit, verbose constructs over implicit Perl idioms. The purpose and intent of the code must be immediately obvious.
+* **Named Lexical Variables (`my`)**:
+    * **ALWAYS** use `my $variable_name` for all variables.
+    * **DO NOT** use the default variable `$_` (e.g., in loops, write `for my $item (@list)` instead of `for (@list)`).
+    * **Placement of Lexical Declarations**: **ALWAYS** declare all `my` (lexical) variables at the **very top of their innermost scope** (typically at the beginning of a subroutine or a block). This provides a clear overview of the variables in play and reduces visual clutter within the logic.
+        * **DO THIS**:
+            ```perl
+            sub process_data {
+                my ($input_text, $config_ref) = @_; # Argument unpacking
+                my $result = '';
+                my $temp_value = 0;
+
+                # ... subroutine logic using declared variables ...
+            }
+            ```
+        * **AVOID THIS**: Declaring `my` variables inline within the logic (e.g., `my $temp_result = calculate_something();` in the middle of a loop).
+* **Explicit Output Formatting**:
+    * **DO NOT** use global output separators like `$,` or `$ `.
+    * **ALWAYS** use `join()` explicitly for list formatting.
+    * **ALWAYS** explicitly add **Unix-style newlines (`\n`) only** (e.g., `print $output . "\n";` or `printf "%s\n", $output;`). **DO NOT** use `\r\n` or other combinations.
+
+### 2. Subroutine Argument Handling (Clear Pass-by-Value Semantics)
+
+* **Immediate Unpacking**: At the very beginning of **every** subroutine, immediately unpack all arguments from the special `@_` array into descriptive **named lexical variables (`my`)**.
+* **DO THIS**:
+    ```perl
+    sub process_data {
+        my ($input_text, $config_hash_ref, $status_array_ref) = @_;
+        # Now use $input_text, $config_hash_ref->{key}, etc.
+        # ... code continues ...
+    }
+    ```
+* **AVOID THIS**: Directly accessing arguments like `$_[0]`, `$_[1]->{key}`, or `$$_[2][0]`.
+
+### 3. Reference Dereferencing and Nested Data Structures
+
+* **Always Use Arrow Operator (`->`)**:
+    * **ALWAYS** use the `->` (arrow) operator for dereferencing references to arrays, hashes, and objects. This explicit syntax is crucial for readability and directly mirrors object/attribute access in other languages.
+* **DO THIS**:
+    ```perl
+    my $user_name = $user_record_ref->{details}->{name};
+    my $first_item = $item_list_ref->[0];
+    ```
+* **AVOID THIS**: The older, ambiguous postfix dereferencing syntax like `$$user_record_ref{details}{name}` or `$$item_list_ref[0]`.
+* **Break Down Complex Chains**: If a dereference chain is longer than two levels, **ALWAYS** assign intermediate references to well-named lexical variables (`my`) for improved clarity and easier translation.
+* **DO THIS**:
+    ```perl
+    my $section_ref = $document_data->{sections}->[$section_index];
+    my $paragraph_text = $section_ref->{paragraphs}->[$para_index]->{content};
+    ```
+* **AVOID THIS**: A very long, unbroken chain like `$document_data->{sections}->[$section_index]->{paragraphs}->[$para_index]->{content}`.
+* **Logical Data Structure Design**: While designing nested data structures, ensure their access remains explicit and easy to follow.
+
+### 4. Avoid Magic Variables and Global State
+
+* **No Direct Global Variable Reliance**:
+    * **DO NOT** modify or rely directly on any global magic variables (e.g., `$,`, `$_`, `$/`, `$!`, `$#array`, etc.).
+    * **ALWAYS** use their explicit, modern equivalents or named lexical variables instead.
+* **Minimize Global State**: Strive for subroutines that are **pure functions**: they should primarily operate on their explicit inputs and produce explicit outputs. Minimize reliance on, or modification of, global state. This makes code significantly easier to test and port.
+
+### 5. Dependency Management
+
+* **Prefer Core Perl / Vanilla Perl**:
+    * **AVOID using CPAN libraries if at all possible.** Prioritize using **pure, core Perl** features and functions.
+    * The goal is to keep the codebase minimal, reduce external dependencies, and simplify deployment and portability.
+    * **ONLY use CPAN modules if a core Perl alternative is demonstrably more complex, less performant, or non-existent for a critical function.** If a CPAN module is absolutely necessary, it **must** be explicitly justified in comments.
+
+### 6. Regex Usage
+
+* **Avoid Excessive or Unnecessary Regex**:
+    * **DO NOT** use complex or nested regular expressions for parsing, data extraction, or validation, especially when simpler string manipulation functions (like `substr`, `index`, `rindex`, `split`, `join`) would suffice.
+    * **Reasons**: Complex regex patterns are notoriously unreadable by humans and prone to unexpected failures due to unhandled edge cases.
+    * **Exception**: Simple substitution patterns are acceptable and encouraged for straightforward text transformations, such as `$text =~ s/pattern/replacement/g;`.
+
+### 7. File and Operating System Compatibility
+
+* **File Naming Conventions**: **ALWAYS** use **lowercase names for all files**. This ensures maximum portability across various operating systems, including case-sensitive filesystems on Linux/macOS and case-insensitive ones on Windows.
+* **Path Separators**: When constructing file paths manually, **ALWAYS** use **forward slashes (`/`)**. Perl's path handling functions (and modern Windows paths) generally normalize them correctly. **DO NOT** hardcode backslashes (`\`) for paths.
+    * *Example:* Use `my $path = "folder/subfolder/file.txt";` not `my $path = "folder\\subfolder\\file.txt";`.
+* **Line Endings**: **ALWAYS** use **Unix-style line endings (`\n`) only** within the code. Your utility functions (`read_file`, `write_file`) are designed to handle system-specific newline conversions for I/O; **DO NOT** manually insert `\r\n` or assume specific line endings in your main logic.
+* **External Commands**: When using `system()` or similar, ensure the commands are universally available or explicitly handled by your `call_llm` abstraction. Assume a standard Windows command prompt environment (CMD/PowerShell compatible) for any direct system calls.
+
+### 8. General Readability and Maintainability
+
+* **Descriptive Naming**: Use clear, descriptive, and self-documenting names for all variables, subroutines, and constants (e.g., `$customer_id`, `process_order_data`, `MAX_RETRIES`).
+* **Concise Comments**: Include concise comments to explain any non-obvious logic, complex algorithms, or crucial design choices.
+* **Consistent Formatting**: Maintain consistent indentation and overall code formatting throughout the generated code.
+* **Single Responsibility**: Keep subroutines focused on a single, well-defined responsibility.
+
+---

@@ -1,0 +1,252 @@
+
+# Perl LLM Project Architecture & Design Patterns
+
+This document outlines the core Perl functions and standard design patterns to be used in all Large Language Model (LLM) integration projects. Adherence to these guidelines is **critical** for consistency, maintainability, and reliable operation.
+
+**It's imperative that the LLM uses the specified functions and design patterns exclusively.** **Don't generate alternative implementations or deviate from these established patterns.**
+
+---
+
+## 1. Core Perl Utility Functions
+
+This section details the foundational Perl functions comprising the utility library. The LLM **must use these functions** when performing tasks that fall within their scope.
+
+### 1.1 File I/O and System Utilities
+
+* **`read_file($filename)`**
+    * **Purpose**: Reads the content of any text file, intelligently determining its encoding.
+    * **Key Features**:
+        * Robustly handles a wide range of encodings (ASCII, UTF-8, UTF-8 BOM, ISO-8859-1, Windows-1252, UTF-16LE/BE, etc.).
+        * Automatically removes Byte Order Marks (BOMs).
+        * Normalizes all line endings to Unix-style (`\n`).
+    * **Returns**: The file content as a scalar string, or an empty string (`''`) on failure.
+* **`write_file($file, $content)`**
+    * **Purpose**: Writes provided content to a specified file.
+    * **Key Features**:
+        * Ensures the output file is written with **UTF-8 encoding**.
+        * Converts Windows-style newlines (`\r\n`) to Unix-style (`\n`) for consistency.
+    * **Returns**: `1` on success, `0` on failure.
+* **`generate_random_string($length)`**
+    * **Purpose**: Generates a random alphanumeric string.
+    * **Parameters**: `$length` (optional, defaults to `20` characters).
+    * **Returns**: A random string of the specified length.
+* **`trim($string)`**
+    * **Purpose**: Removes leading and trailing whitespace from a string.
+    * **Returns**: The trimmed string.
+* **`ensure_directory($dir)`**
+    * **Purpose**: Ensures that a given directory path exists.
+    * **Key Features**: Creates any intermediate directories as needed.
+    * **Dependency**: Internally uses `File::Path qw(make_path)`.
+* **`create_temp_folder()`**
+    * **Purpose**: Ensures that the `./temp` directory exists. This is specifically for temporary file storage related to LLM calls.
+
+### 1.2 LLM Interaction Functions
+
+* **`call_llm($prompt, $template, $config_file, $logs_folder)`**
+    * **Purpose**: The primary function for communicating with the external LLM command-line utility (`call_openrouter.exe`).
+    * **Workflow**:
+        1.  Generates unique temporary input/output file names in the `./temp` directory.
+        2.  Writes the provided `$prompt` (UTF-8 encoded) to the temporary input file.
+        3.  Constructs and executes a system command to invoke `call_openrouter.exe`. This executable handles connecting to the LLM (using configuration data like API keys from `$config_file`), sending the prompt, and writing the response to the output file.
+        4.  Reads the LLM's response from the temporary output file.
+        5.  Trims leading/trailing whitespace from the response.
+    * **Parameters**:
+        * `$prompt` (scalar): The text prompt to send to the LLM.
+        * `$template` (optional, defaults to `'precise'`): Specifies the LLM model template or persona.
+        * `$config_file` (optional, defaults to `'openrouter_config.txt'`): The configuration file for the `call_openrouter.exe` tool.
+        * `$logs_folder` (optional, defaults to `'./logs'`): The directory for LLM call logs.
+    * **Returns**: The LLM's response as a scalar string, or an empty string (`''`) on error.
+* **`hill_climbing($folder, $candidate_prompt, $judge_count, $max_iteration, $evaluation_criteria_file)`**
+    * **Purpose**: Implements an iterative improvement algorithm for LLM outputs, allowing for reflection and refinement. This function is used when the LLM response needs to be iteratively improved based on feedback.
+    * **Workflow**:
+        1.  Generates an initial candidate solution using the `$candidate_prompt` via `call_llm()`.
+        2.  Enters a loop (up to `$max_iteration` times) for refinement:
+            * Retrieves the current "best" solution.
+            * **Critiques** the current "best" by generating a special prompt that asks an LLM for advice on how to improve it, considering the original prompt and `$evaluation_criteria`.
+            * Generates a **new candidate** solution using `$candidate_prompt`, potentially incorporating the advice received from the critique step.
+            * Compares the new candidate against the current "best" using the `judge_voting()` helper function.
+            * If the new candidate is deemed superior (by majority vote of the "judges"), it replaces the "best" solution.
+    * **Parameters**:
+        * `$folder` (scalar): The directory to store `best.txt` and `candidate.txt` files, which track the progress of the hill climbing.
+        * `$candidate_prompt` (scalar): The base prompt used to generate candidate solutions.
+        * `$judge_count` (integer, optional, defaults to `3`): The number of "judges" (separate LLM calls) used within `judge_voting()` for comparison.
+        * `$max_iteration` (integer, optional, defaults to `3`): The maximum number of refinement iterations.
+        * `$evaluation_criteria_file` (scalar, optional): A file containing the specific criteria for evaluating the quality/accuracy of candidate solutions.
+    * **Returns**: Void (the best solution is written to `$folder/best.txt`).
+* **`judge_voting($best_version, $new_candidate, $evaluation_criteria, $judge_count, $original_prompt)`**
+    * **Purpose**: A **helper function for `hill_climbing()`**. It compares two LLM-generated versions (a "best" and a "candidate") based on specified criteria, using multiple LLM calls as "judges" to ensure objective evaluation.
+    * **Workflow**:
+        1.  Constructs a prompt for an LLM "judge," clearly presenting both the `$best_version` and `$new_candidate`, the `$original_prompt` context, and the `$evaluation_criteria`.
+        2.  Executes `call_llm()` `$judge_count` times, each time asking a "judge" to select the better version (indicated by returning `'1'` or `'2'`).
+        3.  Tallies the votes from all judges.
+    * **Parameters**:
+        * `$best_version` (scalar): The content of the currently considered best solution.
+        * `$new_candidate` (scalar): The content of the new candidate solution being evaluated.
+        * `$evaluation_criteria` (scalar): The string defining the criteria for evaluation.
+        * `$judge_count` (integer): The number of LLM "judges" to consult for voting.
+        * `$original_prompt` (scalar): The initial generative prompt that produced these versions (provided for judge context).
+    * **Returns**: `'1'` if the first version wins the majority vote, `'2'` if the second version wins.
+
+### 1.3 Text Cleaning Function
+
+* **`remove_non_ascii($text)`**
+    * **Purpose**: Cleans text by removing or normalizing specific non-ASCII characters that LLMs frequently generate, ensuring output cleanliness and compatibility.
+    * **Key Features**:
+        * **Removes emoticons**.
+        * **Normalizes curly quotes (`“”‘’«»`) and curly apostrophes to straight quotes (`"`, `'`)**.
+        * Normalizes em-dashes (`—`) and en-dashes (`–`) to double hyphens (`--`).
+        * Normalizes ellipsis (`…`) to three periods (`...`).
+        * Removes zero-width characters (e.g., `\x{200B}`).
+        * **Crucially**: Preserves accented characters, non-Latin scripts, and common typographical/currency symbols, while removing other general Unicode "control" or "format" characters.
+        * Normalizes all line endings to Unix-style (`\n`).
+    * **Returns**: The cleaned string.
+
+### 1.4 Tag Extraction Function
+
+* **`extract_text_between_tags($text, $tag, %opts)`**
+    * **Purpose**: Extracts content enclosed within specific tags from an LLM response. This function is **designed to be highly robust** against common LLM formatting inconsistencies and missing tags.
+    * **Key Features**:
+        * **Flexible Tag Matching**: Handles variations in tag syntax (e.g., `< answer >`, `< /answer >`, `<ANSWER>`) and common misspellings (`<answe?r?>`, `<answers?>`).
+        * **LLM-Specific Cleanup**: Automatically removes `<model>...</model>` blocks from the response before extraction, as these are often internal LLM thoughts.
+        * **Intelligent Boundary Handling**: Can infer a missing closing tag (e.g., `</answer>`) if it's followed by known semantic boundary tags like `<comments>` or `<thinking>`.
+        * **Optional Strict Mode**: If `strict => 1` is passed in `%opts`, it requires both a perfectly matched opening and closing tag for extraction; otherwise, it operates in a more flexible mode.
+        * **Post-Extraction Cleanup**: Trims leading/trailing whitespace from the extracted content and applies `remove_non_ascii()` to ensure cleanliness.
+    * **Parameters**:
+        * `$text` (scalar): The full LLM response string.
+        * `$tag` (scalar): The name of the tag to extract (e.g., `'answer'`, `'comments'`, `'thinking'`). Case-insensitivity is handled internally.
+        * `%opts` (hash, optional): Can include `strict => 1` for strict matching (default is flexible `0`).
+    * **Returns**: The extracted and cleaned content as a scalar string, or an empty string (`''`) if content for the specified tag cannot be robustly extracted.
+
+### 1.5 Data Management and Transfer Solutions
+
+* **SQLite for Persistent/Complex Data**:
+    * **Purpose**: Use **SQLite databases** for lightweight, portable, and persistent data storage in Perl scripts. This is especially valuable for data that needs to survive script execution, for complex data structures (beyond simple hashes), and for both text and binary data.
+    * **Advantages**: Free, single-file, easy to use, highly portable (works across Windows, macOS, Linux), can be in-memory or disk-based. Provides excellent traceability and visibility into data after script execution. Easily handles complex data structures. Supports both text and binary data.
+    * **Implementation Guidance**:
+        * Your code should **automatically create the database file, tables, and indexes at startup**, using `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` statements to ensure idempotency.
+        * **Leverage SQL for complex data structures** that would be cumbersome with Perl hashes (associative arrays).
+* **ChromaDB for Vector Embeddings**:
+    * **Purpose**: For managing and querying **vector embeddings**, use **ChromaDB**.
+    * **Advantages**: Free, lightweight, and easy to use for vector search and similarity.
+    * **Implementation Guidance**: Integrate ChromaDB specifically for any vector-related data storage and retrieval tasks.
+* **Base64 Encoding for Binary Data Transfer (HTTPS/HTTP)**:
+    * **Purpose**: When sending **binary data** (e.g., images, files, raw bytes) over HTTP/HTTPS, **ALWAYS encode it with Base64**.
+    * **Reasoning**: HTTP/HTTPS protocols (and underlying network infrastructure) work best with text-based data. Sending raw binary data can lead to corruption, misinterpretation by intermediaries, or unexpected issues. Base64 converts binary into a safe, text-only representation that travels reliably over these channels.
+    * **Implementation Guidance**: Before sending binary data in an HTTP request body or as a parameter, convert it to a Base64 string. On the receiving end, decode the Base64 string back into its original binary form.
+
+---
+
+## 2. LLM Design Patterns
+
+These are standard design patterns that **must be applied** in Perl LLM projects to ensure structured, predictable, and easily parsable outputs.
+
+### 2.1 Response Tagging (Core Structural Pattern)
+
+* **Intent**: To achieve clear and reliable separation between the LLM's primary answer and any other accompanying content. This is fundamental for automated parsing.
+* **Mandatory Tags**:
+    * The primary answer **MUST ALWAYS** be enclosed within **`<answer>...</answer>`** tags.
+    * Any comments, meta-information, or LLM internal thoughts **MUST ALWAYS** be placed within **`<comments>...</comments>`** tags.
+* **When to Use**: **Always**, for any LLM prompt where you need to extract the core response reliably.
+* **Function Used**: `extract_text_between_tags()` is specifically designed to work with this pattern.
+
+### 2.2 Comments Section (Core Structural Pattern)
+
+* **Intent**: To explicitly separate explanatory comments, thoughts, or rationale from the main answer, making both the answer and the additional context easily accessible.
+* **Implementation**: Achieved by instructing the LLM to use the `<comments>...</comments>` tags as described in the "Response Tagging" pattern.
+* **When to Use**: When the LLM might provide useful meta-commentary, its thinking process, or additional context alongside the direct response.
+
+### 2.3 Multiple Response Sections (Core Structural Pattern)
+
+* **Intent**: To capture multiple, distinct structured fields within a single LLM response, allowing for granular data extraction.
+* **Mechanism**: Define unique tag pairs for each desired section (e.g., `<title>...</title>`, `<summary>...</summary>`, `<outline>...</outline>`).
+* **When to Use**: When a prompt elicits several different, clearly defined pieces of information that need to be extracted individually for downstream processing.
+* **Function Used**: `extract_text_between_tags()` can be called multiple times, once for each expected tag, to extract all sections.
+
+### 2.4 Extracting Tagged Content (Core Structural Pattern)
+
+* **Intent**: To enable robust and automated parsing of specific fields from an LLM's structured output. This pattern dictates *how* the data is pulled from the LLM's response.
+* **Implementation**: This pattern is **directly implemented** by the `extract_text_between_tags()` function. The LLM **must rely on this function** for all tag-based extraction tasks.
+* **When to Use**: For any LLM interaction where the response is structured with custom tags.
+
+### 2.5 The Second Mind (Critical Reliability Pattern)
+
+* **Intent**: To address common LLM problems such as forgetting details during revisions, omitting critical information, or failing to fully accomplish a requested task. The "Second Mind" acts as a reflective, evaluative, and self-correcting architectural layer.
+* **Core Problem Addressed**: LLMs can "hallucinate" or present flawed outputs with confidence, and during iterative refinement, they may inadvertently drop key features or drift from the original intent. The Second Mind ensures internal verification and integrity.
+* **Mechanism**: Involves a dedicated process (often implemented as an additional LLM call or a series of reflective prompts) that reviews the primary LLM's output against the original request, known facts, and expected deliverables.
+* **Core Functions**:
+    * **Memory Integrity & Gap Detection**: Checks for consistency and surface-level completeness, flagging forgotten data or contradictions. This is crucial when refining text or code to ensure that improvements don't inadvertently remove essential elements from previous versions or requirements.
+    * **Output Completeness & Intent Alignment**: Verifies that all parts of the task were completed, that claims are supported, and that the LLM's response remains aligned with the original user intent (e.g., tone, format, and direct answer to the question asked).
+    * **Error Detection & Reasoning Review**: Prompts the LLM to explain assumptions, identify potential flaws, omissions, or contradictions in its own output, and assess its confidence level.
+* **Perl Implementation & Application**:
+    * The **`hill_climbing()`** function embodies a primary application of the "Second Mind" by incorporating a critique phase where an LLM is asked to act as a "Second Mind" to evaluate and advise on improvements.
+    * For specific "Second Mind" checks outside of `hill_climbing` (e.g., verifying task accomplishment or performing detailed gap analysis), direct calls to `call_llm()` with specific reflective prompts should be used. The output of such "Second Mind" calls will then guide further actions or revisions.
+* **Meta-Principles**:
+    * **Redundancy is Strength**: Review beats blind trust in LLM outputs.
+    * **Introspection Improves Accuracy**: Self-checking leads to higher quality and more reliable results.
+    * **Fallibility is the Norm**: Assume the LLM will make mistakes without proper oversight and verification mechanisms.
+
+---
+
+## 3. Best Practices for LLM Integration
+
+Adhering to these best practices is **non-negotiable** for all LLM development.
+
+### 3.1 Prompt Design Guidelines
+
+* **Structured Output (Mandatory)**:
+    * **ALWAYS** instruct the LLM to enclose its core answer within **`<answer>...</answer>`** tags.
+    * **ALWAYS** instruct the LLM to place any additional comments or meta-information within **`<comments>...</comments>`** tags.
+* **Output Format (Mandatory)**:
+    * **DO NOT use JSON for output structure**. While popular, LLMs frequently misformat JSON, leading to parsing errors. Prefer simple, tag-based formats (like the XML-like tags described here) or simple tabular outputs for significantly more consistency and reliability.
+    * **Instruct the LLM to use plain, straight quotes (`"` and `'`) and apostrophes only**.
+    * **Tell the LLM to avoid emoticons** and other non-standard punctuation or decorative characters unless their inclusion is absolutely and explicitly required for the output.
+    * **Tell the LLM to avoid emdashes (`—`) and en-dashes (`–`)**, using double hyphens (`--`) instead.
+
+### 3.2 Output Handling Guidelines
+
+* **Mandatory Tag Extraction**: **ALWAYS** use **`extract_text_between_tags()`** to reliably retrieve structured content from LLM responses. **DO NOT write custom parsing logic for tags.**
+* **Mandatory Text Cleaning**: **ALWAYS** apply **`remove_non_ascii()`** to the extracted text for consistent character formatting and removal of unwanted elements.
+* **Mandatory Iterative Improvement**: When a task requires reflection, refinement, or a higher quality output through multiple iterations, **ALWAYS** use **`hill_climbing()`**. **Don't implement custom iterative loops.**
+
+### 3.3 Standard LLM Integration Workflow
+
+The overall workflow for interacting with LLMs **must** follow these steps:
+
+1.  **Prepare the Prompt**: Construct your prompt with clear and explicit instructions for structured output, **always** specifying the use of `<answer>...</answer>` and `<comments>...</comments>` tags.
+2.  **Call the LLM**: Use the **`call_llm()`** function to send the prepared prompt and receive the initial response.
+3.  **Extract Structured Output**: Immediately after receiving the response, utilize **`extract_text_between_tags()`** to parse and retrieve the desired content sections (e.g., the main answer, comments, or other custom sections).
+4.  **Clean Text**: If any character consistency issues are anticipated or observed, apply **`remove_non_ascii()`** to the extracted text to ensure consistent and clean formatting.
+5.  **Iterative Improvement (Conditional)**: If the task requires a refinement loop (e.g., for complex problem-solving, code generation, or creative writing), employ **`hill_climbing()`** to iteratively enhance the quality of the LLM's response, often leveraging the "Second Mind" for critique.
+
+---
+
+## 4. Agentic Programming Pillars (Conceptual Foundations)
+
+These five foundational principles underpin the development of intelligent, self-improving LLM-based systems. While conceptual, they directly guide the application of the Perl functions and design patterns outlined above.
+
+1.  **Iterative Improvement (Hill Climbing)**:
+    * **Concept**: Continuously refine LLM output by generating candidate solutions and using feedback (from a "Second Mind" or a "panel of judges" via `judge_voting()`) to iteratively select and build upon the "best" version until a high-quality result is achieved.
+    * **Perl Implementation**: Directly supported by the **`hill_climbing()`** function.
+2.  **Atomic Task Breakdown (Granular Task Planning)**:
+    * **Concept**: Decompose complex problems into smaller, more manageable, "atomic" subtasks. This simplifies the LLM's workload and makes errors easier to spot and fix.
+    * **Application**: Structure your overall Perl script to break down large LLM requests into a series of smaller, sequential `call_llm()` operations, each focusing on a single atomic task.
+3.  **The Second Mind (Results and Consistency Checking)**:
+    * **Concept**: Implement a dedicated reflective and evaluative layer that reviews, critiques, and corrects the primary LLM's output for completeness, consistency, and alignment with original intent. This prevents "amnesia" where good ideas are lost during refinement and ensures the task is fully accomplished.
+    * **Perl Implementation**: The critique phase within **`hill_climbing()`** directly embodies this pillar, asking an LLM to act as a "Second Mind" to evaluate and advise on improvements. For specific "Second Mind" checks outside of `hill_climbing` (e.g., verifying task accomplishment or performing detailed gap analysis), direct calls to `call_llm()` with specific reflective prompts should be used. The output of such "Second Mind" calls will then guide further actions or revisions.
+4.  **Trusted Transformations (Leveraging LLM Strengths)**:
+    * **Concept**: Identify and focus on tasks where LLMs excel (e.g., summarization, translation, code generation, text reformatting, outlining). Delegate these tasks confidently to the LLM.
+    * **Application**: Design prompts that specifically request these trusted transformations, rather than relying on the LLM for tasks outside its core competencies.
+5.  **Factual Sourcing and Hallucination Mitigation**:
+    * **Concept**: Avoid LLM "hallucinations" by **never** relying on them as primary sources for factual data. Instead, supply accurate information from trusted external sources (databases, APIs, user input) directly in your prompts.
+    * **Application**: Separate data retrieval (from external sources) from data transformation (by the LLM). Use the LLM to process and format verified data, not to generate facts.
+
+---
+
+## 5. Practical Notes
+
+* **Temporary File Management**: The system **always** uses the `./temp` directory for temporary input and output files for LLM calls.
+* **Configuration**: Sensitive data (e.g., API keys) **must** be stored in a separate configuration file (e.g., `openrouter_config.txt`) as referenced by `call_llm()`. **Never hardcode credentials.**
+* **Logging**: LLM calls generate logs in the `./logs` directory, which are essential for debugging, monitoring, and analysis.
+* **Output Consistency**: Strict adherence to the tag-based output formats (e.g., `<answer>`, `<comments>`) is crucial for the reliability of the `extract_text_between_tags()` function.
+
+---
