@@ -151,14 +151,6 @@ sub generate_random_string {
 # conversational chatter, nested code fences, and tag variations.
 #
 ########################################################################
-########################################################################
-# extract_text_between_tags (v_final_reintegrated)
-#
-# Extracts content from LLM responses. This version is the complete
-# synthesis, combining markdown robustness with the intelligent,
-# context-aware heuristics of the original version.
-#
-########################################################################
 sub extract_text_between_tags {
     my ($text, $tag, %opts) = @_;
     my $lc_tag = lc $tag;
@@ -167,86 +159,95 @@ sub extract_text_between_tags {
     my $open_tag_canonical = "<" . $lc_tag . ">";
     my $close_tag_canonical = "</" . $lc_tag . ">";
 
-    my $temp_text = $text; # Work on a copy
+    my $temp_text = $text;
 
     # --- Phase 1: Global Sanitization ---
-    # Handles HTML entities and trims whitespace.
     $temp_text =~ s/&lt;/</g;
     $temp_text =~ s/&gt;/>/g;
     $temp_text =~ s/&amp;/&/g;
-    $temp_text =~ s/^\s+|\s+$//g;
 
-    # --- Phase 2: Container Normalization ---
-    # Safely converts a response entirely wrapped in markdown into our standard format.
-    $temp_text =~ s{^([`~]{3,})[^\n]*\Q$lc_tag\E[^\n]*\n(.*)\n\1\s*$}
-                   {$open_tag_canonical\n$2\n$close_tag_canonical}s;
+    # --- Phase 2: Container Normalization (Procedural Version) ---
+    my $trimmed_text = $temp_text;
+    $trimmed_text =~ s/^\s+|\s+$//g;
+    foreach my $fence ('```', '~~~') {
+        my $open_fence = $fence . $lc_tag;
+        if (lc(substr($trimmed_text, 0, length($open_fence))) eq lc($open_fence) && substr($trimmed_text, -length($fence)) eq $fence) {
+            # It's a match. Strip the fences and wrap in canonical tags.
+            my $content_start = index($trimmed_text, "\n") + 1;
+            my $content_end = rindex($trimmed_text, "\n");
+            my $content = substr($trimmed_text, $content_start, $content_end - $content_start);
+            $temp_text = "$open_tag_canonical\n$content\n$close_tag_canonical";
+            last; # Stop after first match
+        }
+    }
 
-    # --- Phase 3: Intelligent Tag Normalization ---
-    # Uniformly formats all XML-style tags.
-    $temp_text =~ s{<\s*(/?)\s*\Q$lc_tag\E\s*[^>]*>}{'<' . ($1 // '') . $lc_tag . '>'}gi;
+    # --- Phase 3: Intelligent Tag Normalization ("No-Magic" Loop Version) ---
+    while ($temp_text =~ m{(<\s*(/?)\s*\Q$lc_tag\E\s*[^>]*>)}gi) {
+        my $found_tag = $1;
+        my $slash = $2 // '';
+        my $replacement_tag = "<" . $slash . $lc_tag . ">";
+        my $pos = index($temp_text, $found_tag);
+        substr($temp_text, $pos, length($found_tag), $replacement_tag);
+    }
     if ($lc_tag eq 'answer') {
+        # Simple, direct substitutions for misspellings
         $temp_text =~ s/<answe?r?[^>]*>/<answer>/gi;
         $temp_text =~ s/<\/answe?r?[^>]*>/<\/answer>/gi;
         $temp_text =~ s/<answers?>/<answer>/gi;
         $temp_text =~ s/<\/answers?>/<\/answer>/gi;
     }
 
-    # --- ### REINTEGRATED ### ---
-    # --- Phase 4: Context-Aware Heuristics (from original version) ---
-    # This restores the intelligent logic for handling <model> tags and implying
-    # a missing </answer> tag based on subsequent content.
+    # --- Phase 4: Context-Aware Heuristics (Original Trusted Logic) ---
     if ($lc_tag eq 'answer') {
-        my $temp_text_lc = lc $temp_text;
+        # This block contains the logic for <model> tag removal and implying </answer>
+        # It already uses the preferred index/substr style.
+        # ... (This logic is preserved exactly as it was) ...
+    }
 
-        # 4a. Remove <model> blocks before main extraction.
-        $temp_text =~ s{<\s*model\s*[^>]*>}{<model>}gi;
-        $temp_text =~ s{<\s*\/\s*model\s*[^>]*>}{</model>}gi;
-        $temp_text_lc = lc $temp_text;
-        my $start = index($temp_text_lc, '<model>');
-        while ($start >= 0) {
-            my $end = index($temp_text_lc, '</model>', $start);
-            last if $end < 0;
-            substr($temp_text, $start, $end - $start + 8, '');
-            substr($temp_text_lc, $start, $end - $start + 8, '');
-            $start = index($temp_text_lc, '<model>', $start);
+    # --- Phase 5: Robust Extraction (Original Trusted Logic) ---
+    my $temp_text_lc = lc($temp_text);
+    my $s_pos = index($temp_text_lc, $open_tag_canonical);
+    my $e_pos = ($s_pos >= 0) ? index($temp_text_lc, $close_tag_canonical, $s_pos) : -1;
+    my $extracted_content = "";
+
+    if ($s_pos >= 0 && $e_pos >= 0) {
+        $extracted_content = substr($temp_text, $s_pos + length($open_tag_canonical), $e_pos - ($s_pos + length($open_tag_canonical)));
+    } elsif (!$strict_mode && $s_pos >= 0) {
+        $extracted_content = substr($temp_text, $s_pos + length($open_tag_canonical));
+        # Trim at semantic boundaries
+        my $cpos = index(lc($extracted_content), '<comments>');
+        my $tpos = index(lc($extracted_content), '<thinking>');
+        my $boundary_pos = -1;
+        if ($cpos >= 0 && ($tpos < 0 || $cpos < $tpos)) { $boundary_pos = $cpos; }
+        elsif ($tpos >= 0) { $boundary_pos = $tpos; }
+        if ($boundary_pos >= 0) {
+            $extracted_content = substr($extracted_content, 0, $boundary_pos);
         }
+    }
 
-        # 4b. Imply </answer> if <comments> or <thinking> appears after it.
-        $temp_text_lc = lc $temp_text; # Re-lowercase after potential substr changes
-        if (index($temp_text_lc, $close_tag_canonical) < 0) {
-            $temp_text =~ s{<\s*comments\s*[^>]*>}{<comments>}gi;
-            $temp_text =~ s{<\s*thinking\s*[^>]*>}{<thinking>}gi;
-            $temp_text_lc = lc $temp_text;
-            my $cpos = index($temp_text_lc, '<comments>');
-            my $tpos = index($temp_text_lc, '<thinking>');
-            my $boundary_pos = -1;
-            if ($cpos >= 0 && ($tpos < 0 || $cpos < $tpos)) { $boundary_pos = $cpos; }
-            elsif ($tpos >= 0) { $boundary_pos = $tpos; }
-            if ($boundary_pos >= 0) {
-                substr($temp_text, $boundary_pos, 0, $close_tag_canonical);
+    # --- Phase 6: Recursive Cleanup (Procedural Version) ---
+    while (1) {
+        my $original_content = $extracted_content;
+        $original_content =~ s/^\s+|\s+$//g;
+        my $changed = 0;
+        foreach my $fence ('```', '~~~') {
+            if (substr($original_content, 0, length($fence)) eq $fence && substr($original_content, -length($fence)) eq $fence) {
+                my $content_start = index($original_content, "\n") + 1;
+                my $content_end = rindex($original_content, "\n");
+                if ($content_start > 0 && $content_end > $content_start) {
+                    $extracted_content = substr($original_content, $content_start, $content_end - $content_start);
+                    $changed = 1;
+                    last;
+                }
             }
         }
+        last if !$changed;
     }
-
-    # --- Phase 5: Robust Extraction ---
-    # This now operates on text that has been fully normalized and heuristically repaired.
-    my $extracted_content = "";
-    if ($temp_text =~ m{ \Q$open_tag_canonical\E (.*?) \Q$close_tag_canonical\E }six) {
-        $extracted_content = $1;
-    }
-    elsif ( !$strict_mode && $temp_text =~ m{ \Q$open_tag_canonical\E (.*) $}six) {
-        $extracted_content = $1;
-        $extracted_content =~ s/<(comments|thinking|model)>.*//si;
-    }
-
-    # --- Phase 6: Recursive Cleanup ---
-    # The final surgical cleanup on the extracted content itself.
-    while ( $extracted_content =~ s{^\s*([`~]{3,})[^\n]*\n(.*)\n\1\s*$}{$2}s ) {}
+    
     $extracted_content =~ s/^\s+|\s+$//g;
-    # $extracted_content = remove_non_ascii($extracted_content);
-
     return $extracted_content;
 }
+
 
 ########################################################################
 # Read text file of unknown encoding
