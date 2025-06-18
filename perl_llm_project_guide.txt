@@ -250,3 +250,34 @@ These five foundational principles underpin the development of intelligent, self
 * **Output Consistency**: Strict adherence to the tag-based output formats (e.g., `<answer>`, `<comments>`) is crucial for the reliability of the `extract_text_between_tags()` function.
 
 ---
+
+
+## Part 3: Final Verification Process
+
+### 6. Mandatory Code Generation and Verification Protocol
+
+#### 6.1 Phase 1: Initial Code Generation
+
+* Generate complete code draft per guide.
+
+#### 6.2 Phase 2: Iterative Verification Loop
+
+* **Step A – Syntax Check:** `perl -c` validation.
+* **Step B – Code Walk-through:** Logical review, edge cases, style compliance.
+* **Step C – Desk-Check:**
+
+  1. Define ≥3 test cases (Happy Path, Edge Case, Error Case).
+  2. Trace execution with variable tables.
+  3. Verify actual vs. expected outcomes.
+
+#### 6.3 Phase 3: Problem Resolution
+
+1. Identify flaw.
+2. Implement fix.
+3. Repeat Phase 2.
+
+#### 6.4 Phase 4: Final Output
+
+* Present only after all checks pass.
+
+---
