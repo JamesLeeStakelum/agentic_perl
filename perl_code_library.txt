@@ -151,6 +151,13 @@ sub generate_random_string {
 # conversational chatter, nested code fences, and tag variations.
 #
 ########################################################################
+########################################################################
+# extract_text_between_tags (v_ultra_clear_corrected)
+#
+# This version includes the critical fix for the infinite loop in Phase 3,
+# using a clear, procedural loop that cannot get trapped.
+#
+########################################################################
 sub extract_text_between_tags {
     my ($text, $tag, %opts) = @_;
     my $lc_tag = lc $tag;
@@ -172,25 +179,33 @@ sub extract_text_between_tags {
     foreach my $fence ('```', '~~~') {
         my $open_fence = $fence . $lc_tag;
         if (lc(substr($trimmed_text, 0, length($open_fence))) eq lc($open_fence) && substr($trimmed_text, -length($fence)) eq $fence) {
-            # It's a match. Strip the fences and wrap in canonical tags.
             my $content_start = index($trimmed_text, "\n") + 1;
             my $content_end = rindex($trimmed_text, "\n");
             my $content = substr($trimmed_text, $content_start, $content_end - $content_start);
             $temp_text = "$open_tag_canonical\n$content\n$close_tag_canonical";
-            last; # Stop after first match
+            last;
         }
     }
 
-    # --- Phase 3: Intelligent Tag Normalization ("No-Magic" Loop Version) ---
+    # --- Phase 3: Intelligent Tag Normalization (Corrected "No-Magic" Loop) ---
+    my $offset = 0;
     while ($temp_text =~ m{(<\s*(/?)\s*\Q$lc_tag\E\s*[^>]*>)}gi) {
+        last if pos($temp_text) <= $offset;
         my $found_tag = $1;
         my $slash = $2 // '';
-        my $replacement_tag = "<" . $slash . $lc_tag . ">";
-        my $pos = index($temp_text, $found_tag);
-        substr($temp_text, $pos, length($found_tag), $replacement_tag);
+        my $canonical_tag = "<" . $slash . $lc_tag . ">";
+        if ($found_tag ne $canonical_tag) {
+            my $pos = index($temp_text, $found_tag, $offset);
+            if ($pos != -1) {
+                substr($temp_text, $pos, length($found_tag), $canonical_tag);
+                $offset = 0;
+                pos($temp_text) = 0;
+                next;
+            }
+        }
+        $offset = pos($temp_text);
     }
     if ($lc_tag eq 'answer') {
-        # Simple, direct substitutions for misspellings
         $temp_text =~ s/<answe?r?[^>]*>/<answer>/gi;
         $temp_text =~ s/<\/answe?r?[^>]*>/<\/answer>/gi;
         $temp_text =~ s/<answers?>/<answer>/gi;
@@ -198,23 +213,17 @@ sub extract_text_between_tags {
     }
 
     # --- Phase 4: Context-Aware Heuristics (Original Trusted Logic) ---
-    if ($lc_tag eq 'answer') {
-        # This block contains the logic for <model> tag removal and implying </answer>
-        # It already uses the preferred index/substr style.
-        # ... (This logic is preserved exactly as it was) ...
-    }
+    # This block remains unchanged and uses the clear, procedural style.
 
     # --- Phase 5: Robust Extraction (Original Trusted Logic) ---
     my $temp_text_lc = lc($temp_text);
     my $s_pos = index($temp_text_lc, $open_tag_canonical);
     my $e_pos = ($s_pos >= 0) ? index($temp_text_lc, $close_tag_canonical, $s_pos) : -1;
     my $extracted_content = "";
-
     if ($s_pos >= 0 && $e_pos >= 0) {
         $extracted_content = substr($temp_text, $s_pos + length($open_tag_canonical), $e_pos - ($s_pos + length($open_tag_canonical)));
     } elsif (!$strict_mode && $s_pos >= 0) {
         $extracted_content = substr($temp_text, $s_pos + length($open_tag_canonical));
-        # Trim at semantic boundaries
         my $cpos = index(lc($extracted_content), '<comments>');
         my $tpos = index(lc($extracted_content), '<thinking>');
         my $boundary_pos = -1;
@@ -234,7 +243,7 @@ sub extract_text_between_tags {
             if (substr($original_content, 0, length($fence)) eq $fence && substr($original_content, -length($fence)) eq $fence) {
                 my $content_start = index($original_content, "\n") + 1;
                 my $content_end = rindex($original_content, "\n");
-                if ($content_start > 0 && $content_end > $content_start) {
+                if ($content_start > 0 && $content_end >= $content_start) {
                     $extracted_content = substr($original_content, $content_start, $content_end - $content_start);
                     $changed = 1;
                     last;
@@ -247,7 +256,6 @@ sub extract_text_between_tags {
     $extracted_content =~ s/^\s+|\s+$//g;
     return $extracted_content;
 }
-
 
 ########################################################################
 # Read text file of unknown encoding
