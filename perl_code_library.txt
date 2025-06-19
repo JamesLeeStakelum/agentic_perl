@@ -1,3 +1,9 @@
+use HTTP::Tiny;
+use JSON::PP;
+use List::Util qw(shuffle);
+use Time::HiRes qw(sleep gettimeofday); # Added gettimeofday
+use POSIX qw(strftime);
+use Encode qw(decode);
 
 ########################################################################
 ########################################################################
@@ -6,6 +12,173 @@
 ########################################################################
 ########################################################################
 ########################################################################
+
+########################################################################
+# read_openrouter_config($config_file)
+#
+# Helper to read and parse the openrouter_config.txt file.
+########################################################################
+sub read_openrouter_config {
+    my ($config_file) = @_;
+    my ($api_key, @models, $content, $in_models_section, $line) = (undef, (), undef, 0, undef);
+    $content = read_file($config_file);
+    return (undef, undef) unless defined $content && $content ne '';
+    for $line (split /\r?\n/, $content) {
+        $line = trim($line);
+        next if $line eq '' || substr($line, 0, 1) eq '#';
+        if (lc $line eq '[models]') { $in_models_section = 1; next; }
+        elsif (lc $line eq '[api key]') { $in_models_section = 0; next; }
+        if ($in_models_section) { push @models, $line; }
+        elsif ($line =~ /^sk-or-v1-/) { $api_key = $line; }
+    }
+    return ($api_key, \@models);
+}
+
+########################################################################
+# call_openrouter_api(%args)
+#
+# Makes a direct, robust API call to OpenRouter. This is the core
+# function that replaces the external script.
+########################################################################
+sub call_openrouter_api {
+    my (%args) = @_;
+
+    # --- Lexical Variable Declarations & Argument Unpacking ---
+    my $prompt      = $args{prompt};
+    my $api_key     = $args{api_key};
+    my $models_ref  = $args{models};
+    my $template    = $args{template}    // 'balanced';
+    my $timeout     = $args{timeout}     // 30;
+    my $max_retries = $args{max_retries} // 3;
+    my $delay       = $args{delay}       // 5;
+
+    my ($templates_ref, $settings_ref, @selected_models, $sample_size);
+    my ($url, $http, %headers, %payload, $json_payload, $attempt);
+    my ($response, $decoded_response, $response_content, $model_used);
+
+    # --- Full Template Definitions ---
+    $templates_ref = {
+        "precise"           => { "temperature" => 0.0, "top_p" => 0.1, "top_k" => 5 },
+        "balanced"          => { "temperature" => 0.5, "top_p" => 0.5, "top_k" => 30 },
+        "creative"          => { "temperature" => 1.0, "top_p" => 0.9, "top_k" => 50 },
+        "brainstorm"        => { "temperature" => 1.5, "top_p" => 1.0, "top_k" => 100 },
+        "summarization"     => { "temperature" => 0.3, "top_p" => 0.2, "top_k" => 10 },
+        "Youtubeing"        => { "temperature" => 0.3, "top_p" => 0.2, "top_k" => 10 },
+        "dialogue"          => { "temperature" => 0.8, "top_p" => 0.9, "top_k" => 50 },
+        "code_generation"   => { "temperature" => 0.2, "top_p" => 0.2, "top_k" => 10 },
+        "paraphrasing"      => { "temperature" => 0.6, "top_p" => 0.7, "top_k" => 30 },
+        "formal"            => { "temperature" => 0.3, "top_p" => 0.3, "top_k" => 20 },
+        "casual"            => { "temperature" => 0.7, "top_p" => 0.8, "top_k" => 40 },
+        "tech-heavy"        => { "temperature" => 0.1, "top_p" => 0.2, "top_k" => 5 },
+        "inspirational"     => { "temperature" => 1.2, "top_p" => 1.0, "top_k" => 60 },
+        "news_journalistic" => { "temperature" => 0.3, "top_p" => 0.4, "top_k" => 20 }
+    };
+    $settings_ref = $templates_ref->{$template} // $templates_ref->{balanced};
+
+    # --- Correct Random Model Selection ---
+    $sample_size = @$models_ref < 3 ? @$models_ref : 3;
+    @selected_models = (shuffle(@$models_ref))[0 .. $sample_size - 1];
+
+    # --- HTTP Request Setup ---
+    $url = "https://openrouter.ai/api/v1/chat/completions";
+    %payload = (
+        messages => [ { role => 'user', content => $prompt } ],
+        models   => \@selected_models,
+        %{ $settings_ref }
+    );
+    $json_payload = JSON::PP->new->utf8->encode(\%payload);
+    $http = HTTP::Tiny->new(timeout => $timeout);
+    %headers = (
+        'Authorization' => "Bearer $api_key",
+        'Content-Type'  => 'application/json',
+        'HTTP-Referer'  => 'http://localhost',
+        'X-Title'       => 'Perl Agentic Library'
+    );
+
+    # --- Request & Retry Loop ---
+    for $attempt (1 .. $max_retries) {
+        $response = $http->post($url, { headers => \%headers, content => $json_payload });
+        if ($response->{success}) {
+            $decoded_response = eval { JSON::PP->new->utf8->decode($response->{content}) };
+            if (!$@ && ref $decoded_response eq 'HASH' && ref($decoded_response->{choices}) eq 'ARRAY' && @{$decoded_response->{choices}}) {
+                $response_content = $decoded_response->{choices}->[0]->{message}->{content} // '';
+                $model_used = $decoded_response->{choices}->[0]->{model} // $selected_models[0];
+                return "<model>$model_used</model>\n" . $response_content;
+            }
+        }
+        sleep $delay if $attempt < $max_retries;
+    }
+    warn "Failed to get valid response from OpenRouter after $max_retries attempts.\n";
+    return '';
+}
+
+########################################################################
+# call_llm($prompt, $template, $config_file, $logs_folder)
+#
+# Acts as the primary, high-level function for making a call to a
+# Large Language Model via the OpenRouter service.
+#
+# It orchestrates the entire process by:
+#  1. Handling default parameters for the template, config, and logs folder.
+#  2. Calling `read_openrouter_config` to load the API key and models.
+#  3. Delegating the actual HTTP request to `call_openrouter_api`.
+#  4. Creating a permanent, process-safe log of both the prompt and the
+#     full response in the specified logs folder. The log files are
+#     named with a high-resolution timestamp for chronological sorting.
+#  5. Returning the final, trimmed response string to the caller.
+#
+# This function is intended to be the standard, simplified entry point
+# for all LLM interactions within the library.
+########################################################################
+sub call_llm {
+    my ($prompt, $template, $config_file, $logs_folder) = @_;
+
+    # --- Default Parameter Handling ---
+    $template    = 'precise' unless defined $template && $template ne '';
+    $config_file = 'openrouter_config.txt' unless defined $config_file && $config_file ne '';
+    $logs_folder = './logs' unless defined $logs_folder && $logs_folder ne '';
+
+    # --- Setup and Validation ---
+    ensure_directory($logs_folder);
+    my ($api_key, $models_ref) = read_openrouter_config($config_file);
+    unless (defined $api_key && defined $models_ref && @$models_ref) {
+        warn "call_llm failed: Could not read API key or models from '$config_file'\n";
+        return '';
+    }
+
+    # --- Call Core API Function ---
+    my $response = call_openrouter_api(
+        prompt      => $prompt,
+        api_key     => $api_key,
+        models      => $models_ref,
+        template    => $template,
+    );
+    
+    # --- Logging a permanent, high-resolution, process-safe record ---
+    # 1. Get high-resolution time (seconds and microseconds)
+    my ($seconds, $microseconds) = gettimeofday();
+    
+    # 2. Format the main timestamp from the seconds part
+    my $timestamp_ymdhms = strftime "%Y%m%d-%H%M%S", localtime($seconds);
+    
+    # 3. Calculate and format milliseconds from the microseconds part
+    my $milliseconds = int($microseconds / 1000);
+    my $formatted_ms = sprintf("%03d", $milliseconds);
+
+    # 4. Format the Process ID for uniqueness in concurrency
+    my $formatted_pid = sprintf("%06d", $$);
+
+    # 5. Combine all parts into a unique, sortable, and readable log name
+    my $log_base_name = "${timestamp_ymdhms}-${formatted_ms}_pid${formatted_pid}";
+
+    # Write the prompt and the response to the logs folder.
+    write_file("$logs_folder/${log_base_name}_prompt.txt", $prompt);
+    write_file("$logs_folder/${log_base_name}_response.txt", $response);
+    
+    # --- Final Processing ---
+    $response =~ s/^\s+|\s+$//g;
+    return $response;
+}
 
 ########################################################################
 # LLM Interaction
@@ -141,23 +314,6 @@ sub generate_random_string {
 #     pairs are extracted.
 #
 ########################################################################
-
-########################################################################
-# extract_text_between_tags (v_robust)
-#
-# Extracts content from LLM responses. This function is an extremely
-# robust synthesis of multiple expert strategies, designed to handle
-# a wide array of formatting errors including markdown/XML hybrids,
-# conversational chatter, nested code fences, and tag variations.
-#
-########################################################################
-########################################################################
-# extract_text_between_tags (v_ultra_clear_corrected)
-#
-# This version includes the critical fix for the infinite loop in Phase 3,
-# using a clear, procedural loop that cannot get trapped.
-#
-########################################################################
 sub extract_text_between_tags {
     my ($text, $tag, %opts) = @_;
     my $lc_tag = lc $tag;
@@ -273,8 +429,6 @@ sub extract_text_between_tags {
 ########################################################################
 
 # This subroutine requires the core Encode module for robust text decoding.
-use Encode qw(decode);
-
 sub read_file {
 
     my ($filename) = @_;
