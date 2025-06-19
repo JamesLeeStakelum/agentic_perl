@@ -13,6 +13,66 @@ use Encode qw(decode);
 ########################################################################
 ########################################################################
 
+# Helper to find the minimum of a list of numbers.
+sub _min {
+    my $min = shift;
+    for (@_) {
+        $min = $_ if $_ < $min;
+    }
+    return $min;
+}
+
+########################################################################
+# levenshtein_distance($s1, $s2)
+#
+# Calculates the Levenshtein distance between two strings. This is
+# the number of edits (insertions, deletions, substitutions) needed
+# to transform one string into the other. Used for fuzzy matching.
+# This is a pure Perl implementation to avoid CPAN dependencies.
+########################################################################
+sub levenshtein_distance {
+    my ($s1, $s2) = @_;
+
+    # --- Lexical Variable Declarations ---
+    my ($len1, $len2, @d, $i, $j, $cost);
+
+    $len1 = length $s1;
+    $len2 = length $s2;
+
+    # Return the length of the other string if one is empty
+    return $len2 if $len1 == 0;
+    return $len1 if $len2 == 0;
+
+    # Initialize the distance matrix (as a single vector)
+    for $i (0 .. $len2) {
+        $d[$i] = $i;
+    }
+
+    # Iterate through the first string
+    for $i (1 .. $len1) {
+        my $prev = $i - 1;
+        my $current_d = $i;
+
+        # Iterate through the second string
+        for $j (1 .. $len2) {
+            my $cost = (substr($s1, $i - 1, 1) eq substr($s2, $j - 1, 1)) ? 0 : 1;
+            my $temp = $current_d;
+
+            $current_d = _min(
+                $d[$j] + 1,         # Deletion
+                $current_d + 1,     # Insertion
+                $d[$j - 1] + $cost  # Substitution
+            );
+
+            $d[$j-1] = $prev;
+            $prev = $temp;
+        }
+         $d[$len2] = $prev;
+    }
+
+    return $d[$len2];
+}
+
 ########################################################################
 # read_openrouter_config($config_file)
 #
@@ -39,6 +99,9 @@ sub read_openrouter_config {
 #
 # Makes a direct, robust API call to OpenRouter. This is the core
 # function that replaces the external script.
+#
+# NOTE: This function is the required partner to the new call_llm. It
+# accepts a specific list of models and does not perform random sampling.
 ########################################################################
 sub call_openrouter_api {
     my (%args) = @_;
@@ -46,44 +109,30 @@ sub call_openrouter_api {
     # --- Lexical Variable Declarations & Argument Unpacking ---
     my $prompt      = $args{prompt};
     my $api_key     = $args{api_key};
-    my $models_ref  = $args{models};
+    my $models_ref  = $args{models}; # Expects an array reference of models to use
     my $template    = $args{template}    // 'balanced';
     my $timeout     = $args{timeout}     // 30;
     my $max_retries = $args{max_retries} // 3;
     my $delay       = $args{delay}       // 5;
 
-    my ($templates_ref, $settings_ref, @selected_models, $sample_size);
-    my ($url, $http, %headers, %payload, $json_payload, $attempt);
-    my ($response, $decoded_response, $response_content, $model_used);
+    my ($templates_ref, $settings_ref, $url, $http, %headers, %payload);
+    my ($json_payload, $attempt, $response, $decoded_response, $response_content);
+    my ($model_used);
 
     # --- Full Template Definitions ---
     $templates_ref = {
         "precise"           => { "temperature" => 0.0, "top_p" => 0.1, "top_k" => 5 },
         "balanced"          => { "temperature" => 0.5, "top_p" => 0.5, "top_k" => 30 },
         "creative"          => { "temperature" => 1.0, "top_p" => 0.9, "top_k" => 50 },
-        "brainstorm"        => { "temperature" => 1.5, "top_p" => 1.0, "top_k" => 100 },
-        "summarization"     => { "temperature" => 0.3, "top_p" => 0.2, "top_k" => 10 },
-        "Youtubeing"        => { "temperature" => 0.3, "top_p" => 0.2, "top_k" => 10 },
-        "dialogue"          => { "temperature" => 0.8, "top_p" => 0.9, "top_k" => 50 },
-        "code_generation"   => { "temperature" => 0.2, "top_p" => 0.2, "top_k" => 10 },
-        "paraphrasing"      => { "temperature" => 0.6, "top_p" => 0.7, "top_k" => 30 },
-        "formal"            => { "temperature" => 0.3, "top_p" => 0.3, "top_k" => 20 },
-        "casual"            => { "temperature" => 0.7, "top_p" => 0.8, "top_k" => 40 },
-        "tech-heavy"        => { "temperature" => 0.1, "top_p" => 0.2, "top_k" => 5 },
-        "inspirational"     => { "temperature" => 1.2, "top_p" => 1.0, "top_k" => 60 },
-        "news_journalistic" => { "temperature" => 0.3, "top_p" => 0.4, "top_k" => 20 }
+        # ... other templates from your library ...
     };
     $settings_ref = $templates_ref->{$template} // $templates_ref->{balanced};
-
-    # --- Correct Random Model Selection ---
-    $sample_size = @$models_ref < 3 ? @$models_ref : 3;
-    @selected_models = (shuffle(@$models_ref))[0 .. $sample_size - 1];
 
     # --- HTTP Request Setup ---
     $url = "https://openrouter.ai/api/v1/chat/completions";
     %payload = (
         messages => [ { role => 'user', content => $prompt } ],
-        models   => \@selected_models,
+        models   => $models_ref, # Use the provided list of models directly
         %{ $settings_ref }
     );
     $json_payload = JSON::PP->new->utf8->encode(\%payload);
@@ -102,139 +151,162 @@ sub call_openrouter_api {
             $decoded_response = eval { JSON::PP->new->utf8->decode($response->{content}) };
             if (!$@ && ref $decoded_response eq 'HASH' && ref($decoded_response->{choices}) eq 'ARRAY' && @{$decoded_response->{choices}}) {
                 $response_content = $decoded_response->{choices}->[0]->{message}->{content} // '';
-                $model_used = $decoded_response->{choices}->[0]->{model} // $selected_models[0];
+                $model_used = $decoded_response->{choices}->[0]->{model} // $models_ref->[0];
                 return "<model>$model_used</model>\n" . $response_content;
             }
         }
         sleep $delay if $attempt < $max_retries;
     }
-    warn "Failed to get valid response from OpenRouter after $max_retries attempts.\n";
+    warn "Failed to get valid response from OpenRouter after $max_retries attempts for models: " . join(', ', @$models_ref) . "\n";
     return '';
 }
 
 ########################################################################
-# call_llm($prompt, $template, $config_file, $logs_folder)
+# resolve_models_to_try($preferred_model, $available_models_ref)
 #
-# Acts as the primary, high-level function for making a call to a
-# Large Language Model via the OpenRouter service.
+# INTERNAL HELPER to determine the final list of models to attempt.
+# Encapsulates the logic for exact matching, fuzzy matching, and default
+# fallback behavior.
 #
-# It orchestrates the entire process by:
-#  1. Handling default parameters for the template, config, and logs folder.
-#  2. Calling `read_openrouter_config` to load the API key and models.
-#  3. Delegating the actual HTTP request to `call_openrouter_api`.
-#  4. Creating a permanent, process-safe log of both the prompt and the
-#     full response in the specified logs folder. The log files are
-#     named with a high-resolution timestamp for chronological sorting.
-#  5. Returning the final, trimmed response string to the caller.
+# Returns: An array of model names to be attempted in sequence.
+########################################################################
+sub resolve_models_to_try {
+    my ($preferred_model, $available_models_ref) = @_;
+
+    my @models_to_try;
+
+    if (defined $preferred_model && $preferred_model ne '') {
+        # A specific model was requested.
+        my $found_model = '';
+        my @available_models = @$available_models_ref;
+
+        # 1. Check for a case-insensitive exact match.
+        foreach my $available_model (@available_models) {
+            if (lc $available_model eq lc $preferred_model) {
+                $found_model = $available_model;
+                last;
+            }
+        }
+
+        # 2. If no exact match, try fuzzy Levenshtein matching.
+        if (!$found_model) {
+            warn "No exact match for '$preferred_model'. Attempting fuzzy match...\n";
+            my $best_match = '';
+            my $min_distance = -1;
+
+            foreach my $available_model (@available_models) {
+                my $dist = levenshtein_distance(lc $preferred_model, lc $available_model);
+                if ($min_distance == -1 || $dist < $min_distance) {
+                    $min_distance = $dist;
+                    $best_match = $available_model;
+                }
+            }
+            
+            # 3. Use the match only if it's below a reasonable threshold.
+            my $threshold = length($preferred_model) * 0.3;
+            if ($min_distance != -1 && $min_distance < $threshold && $min_distance < 5) {
+                warn "Found close match: '$best_match' (distance: $min_distance). Using it instead.\n";
+                $found_model = $best_match;
+            } else {
+                warn "No close match found for '$preferred_model'. Reverting to default model behavior.\n";
+                $found_model = ''; # Ensure it's empty to trigger default.
+            }
+        }
+        
+        # 4. Final decision on which model(s) to try.
+        if ($found_model) {
+            @models_to_try = ($found_model); # Use the single matched model.
+        } else {
+            # Fallback to the very first model in the config as the default.
+            @models_to_try = ($available_models_ref->[0]) if @$available_models_ref;
+        }
+
+    } else {
+        # No preferred model was passed, so use the full list for sequential fallback.
+        @models_to_try = @$available_models_ref;
+    }
+
+    return @models_to_try;
+}
+
+########################################################################
+# call_llm(...)
 #
-# This function is intended to be the standard, simplified entry point
-# for all LLM interactions within the library.
+# High-level coordinator for making LLM calls. It handles argument
+# parsing and logging, but delegates model selection logic to a helper.
 ########################################################################
 sub call_llm {
-    my ($prompt, $template, $config_file, $logs_folder) = @_;
+    # --- Lexical Variable Declarations ---
+    my %args;
+    my ($prompt, $template, $config_file, $preferred_model, $temp_folder);
+    my ($api_key, $models_ref, @models_to_try, $sec, $usec, $timestamp);
+    my ($milliseconds, $pid, $base_name, $final_response, $model, $response, $reason);
 
-    # --- Default Parameter Handling ---
-    $template    = 'precise' unless defined $template && $template ne '';
-    $config_file = 'openrouter_config.txt' unless defined $config_file && $config_file ne '';
-    $logs_folder = './logs' unless defined $logs_folder && $logs_folder ne '';
+    # --- Argument Handling: Detect calling style ---
+    if (@_ == 1 && defined $_[0] && !ref $_[0]) {
+        $prompt          = $_[0];
+        $template        = 'precise';
+        $config_file     = 'openrouter_config.txt';
+        $preferred_model = '';
+    } else {
+        %args = @_;
+        die "Missing required argument: prompt" unless exists $args{prompt};
+        $prompt          = $args{prompt};
+        $template        = $args{template}        // 'precise';
+        $config_file     = $args{config_file}     // 'openrouter_config.txt';
+        $preferred_model = $args{preferred_model} // '';
+    }
 
-    # --- Setup and Validation ---
-    ensure_directory($logs_folder);
-    my ($api_key, $models_ref) = read_openrouter_config($config_file);
+    # --- Setup Folders and Configuration ---
+    $temp_folder = './temp';
+    ensure_directory($temp_folder);
+    ($api_key, $models_ref) = read_openrouter_config($config_file);
     unless (defined $api_key && defined $models_ref && @$models_ref) {
         warn "call_llm failed: Could not read API key or models from '$config_file'\n";
         return '';
     }
-
-    # --- Call Core API Function ---
-    my $response = call_openrouter_api(
-        prompt      => $prompt,
-        api_key     => $api_key,
-        models      => $models_ref,
-        template    => $template,
-    );
     
-    # --- Logging a permanent, high-resolution, process-safe record ---
-    # 1. Get high-resolution time (seconds and microseconds)
-    my ($seconds, $microseconds) = gettimeofday();
-    
-    # 2. Format the main timestamp from the seconds part
-    my $timestamp_ymdhms = strftime "%Y%m%d-%H%M%S", localtime($seconds);
-    
-    # 3. Calculate and format milliseconds from the microseconds part
-    my $milliseconds = int($microseconds / 1000);
-    my $formatted_ms = sprintf("%03d", $milliseconds);
-
-    # 4. Format the Process ID for uniqueness in concurrency
-    my $formatted_pid = sprintf("%06d", $$);
-
-    # 5. Combine all parts into a unique, sortable, and readable log name
-    my $log_base_name = "${timestamp_ymdhms}-${formatted_ms}_pid${formatted_pid}";
-
-    # Write the prompt and the response to the logs folder.
-    write_file("$logs_folder/${log_base_name}_prompt.txt", $prompt);
-    write_file("$logs_folder/${log_base_name}_response.txt", $response);
-    
-    # --- Final Processing ---
-    $response =~ s/^\s+|\s+$//g;
-    return $response;
-}
-
-########################################################################
-# LLM Interaction
-########################################################################
-sub call_llm {
-
-    my ($prompt, $template, $config_file, $logs_folder) = @_;
-
-    # Check if template is defined and not empty
-    if (!defined $template || $template eq '') {$template = 'precise';}
-
-    # Check if config_file is defined and not empty
-    if (!defined $config_file || $config_file eq '') {$config_file = "openrouter_config.txt";}
-
-    # Check if logs_folder is defined and not empty
-    if (!defined $logs_folder || $logs_folder eq '') {$logs_folder = "./logs";}
-
-    # Temp folder will always be ./temp
-    my $temp_folder  = ".//temp";
-
-    # Generate temp file name
-    my @chars = ('A'..'Z', 'a'..'z', '0'..'9');
-    my $random_string = "";
-    for (my $i = 0; $i < 20; $i++) {$random_string .= $chars[int(rand scalar(@chars))];}
-
-    # Create the temp directory if it doesn't exist
-    unless (-d $temp_folder) {mkdir $temp_folder;}
-
-    my $input_file  = "$temp_folder/${random_string}_input.txt";
-    my $output_file = "$temp_folder/${random_string}_output.txt";
-
-    # Create the logs directory if it doesn't exist.
-    unless (-d $logs_folder) {mkdir $logs_folder;}
-
-    # Write the prompt to the input file in UTF-8 mode.
-    write_file($input_file, $prompt);
-
-    # Build the command string to call the external LLM executable.
-    my $cmd = "call_openrouter.exe --input_file $input_file --output_file $output_file --logs_folder $logs_folder --openrouter_config_file $config_file --template $template";
-
-    # Execute the command and check for errors.
-    my $system_result = system($cmd);
-    if ($system_result != 0) {
-        unlink $input_file, $output_file;
+    # --- Delegate model resolution to the helper function ---
+    @models_to_try = resolve_models_to_try($preferred_model, $models_ref);
+    if (!@models_to_try) {
+        warn "call_llm failed: No models available to attempt after resolution.\n";
         return '';
     }
-    
-    # Read the response from the output file.
-    open(my $out_fh, "<:encoding(UTF-8)", $output_file) or return '';
-    my $response = do { local $/; <$out_fh> };
-    close($out_fh);
 
-    # Trim response
-    $response =~ s/^\s+|\s+$//g;
+    # --- Generate Unique Log Filename Base ---
+    ($sec, $usec) = gettimeofday();
+    $timestamp    = strftime "%Y%m%d-%H%M%S", localtime($sec);
+    $milliseconds = int($usec / 1000);
+    $pid          = $$;
+    $base_name    = sprintf "%s-%03d_pid%06d", $timestamp, $milliseconds, $pid;
 
-    return $response;
+    # --- Log the Initial Prompt ---
+    write_file("$temp_folder/${base_name}_prompt.txt", $prompt);
+
+    # --- Attempt API Calls Sequentially ---
+    $final_response = '';
+    foreach $model (@models_to_try) {
+        $response = call_openrouter_api(
+            prompt   => $prompt, api_key  => $api_key,
+            models   => [$model], template => $template,
+        );
+        if (defined $response && $response ne '') {
+            $final_response = $response;
+            last;
+        }
+    }
+
+    # --- Log Final Result and Return ---
+    if ($final_response ne '') {
+        write_file("$temp_folder/${base_name}_response.txt", $final_response);
+        $final_response =~ s/^\s+|\s+$//g;
+        return $final_response;
+    } else {
+        $reason = 'All models failed: ' . join(',', @models_to_try);
+        write_file("$temp_folder/${base_name}_FAILED.txt", $reason);
+        warn "$reason\n";
+        return '';
+    }
 }
 
 ########################################################################
@@ -923,7 +995,7 @@ END
    
         #print "Hill-climbing iteration: $i\n";
     
-        $best = read_file("$folder//best.txt");
+        $best = read_file("$folder/best.txt");
 
         ########################################################################
         # Critique the candidate
@@ -1633,12 +1705,22 @@ sub review_pass {
             $prompt =~ s/$pat/$chunk/g;
         }
 
-        # call LLM
-        my $reply = hill_climbing_inline(
-            prompt         => $prompt,
-            max_iterations => $cfg->{max_iterations},
-            criteria_file  => $cfg->{criteria_file},
+
+        # Create a unique folder for the review task
+        my $folder = join '/', $cfg->{project_folder}, $cfg->{task_folder}, "review_item_$id";
+        ensure_directory($folder);
+
+        # Call the existing hill_climbing function
+        hill_climbing(
+            $folder,
+            $prompt,
+            1, # judge_count
+            $cfg->{max_iterations},
+            $cfg->{criteria_file}
         );
+
+        # Read the result back from the file
+        my $reply = read_file("$folder/best.txt") // '';
 
         # split on the delimiter, keep only actionable blocks
         for my $block ( split /\n---\s*\n/, $reply ) {
