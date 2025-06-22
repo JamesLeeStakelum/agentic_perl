@@ -80,18 +80,64 @@ sub levenshtein_distance {
 ########################################################################
 sub read_openrouter_config {
     my ($config_file) = @_;
-    my ($api_key, @models, $content, $in_models_section, $line) = (undef, (), undef, 0, undef);
-    $content = read_file($config_file);
-    return (undef, undef) unless defined $content && $content ne '';
-    for $line (split /\r?\n/, $content) {
-        $line = trim($line);
-        next if $line eq '' || substr($line, 0, 1) eq '#';
-        if (lc $line eq '[models]') { $in_models_section = 1; next; }
-        elsif (lc $line eq '[api key]') { $in_models_section = 0; next; }
-        if ($in_models_section) { push @models, $line; }
-        elsif ($line =~ /^sk-or-v1-/) { $api_key = $line; }
+    my ($api_key, @models);
+    my $content = read_file($config_file);
+
+    unless (defined $content && $content ne '') {
+        warn "ERROR: read_openrouter_config: Failed to read content from '$config_file' or content is empty.\n";
+        return (undef, undef);
     }
+
+    my $current_section = ''; # State variable: '', 'models', 'api_key', 'logging'
+
+    for my $line (split /\r?\n/, $content) {
+        my $trimmed_line = trim($line);
+
+        # 1. Check for new section headers FIRST. This changes the state.
+        if ($trimmed_line =~ /^\[(\w+\s*\w*)\]$/) { # Matches [Section Name]
+            $current_section = lc $1; # Store the lowercased section name
+            $current_section =~ s/\s+//g; # Remove spaces (e.g., 'api key' -> 'apikey')
+            next; # Skip processing the header line itself
+        }
+
+        # 2. Skip empty lines and comments (after trimming and section check)
+        next if $trimmed_line eq '' || substr($trimmed_line, 0, 1) eq '#';
+
+        # 3. Process lines based on the current section
+        if ($current_section eq 'models') {
+            # If we're in the models section and it's not a comment/empty, it's a model.
+            push @models, $trimmed_line;
+        }
+        elsif ($current_section eq 'apikey') { # Note: 'apikey' due to space removal
+            # If we're in the API Key section and it's not a comment/empty, it's the key.
+            # Assuming the API key format is unique enough to identify it.
+            if ($trimmed_line =~ /^sk-or-v1-/) {
+                $api_key = $trimmed_line;
+            }
+        }
+        # Add 'elsif ($current_section eq 'logging') { ... }' if you need to parse values from [Logging]
+        # Otherwise, lines in other sections are simply ignored by this function.
+    }
+
+    # --- Final validation and return ---
+    unless (defined $api_key) {
+        warn "WARNING: No OpenRouter API key found in '$config_file'.\n";
+    }
+    unless (@models) {
+        warn "WARNING: No models found in the [Models] section of '$config_file'.\n";
+    }
+
+    # --- Debug output (optional, remove after testing) ---
+    #print "--- DEBUG read_openrouter_config ---\n";
+    #print "API Key: " . (defined $api_key ? substr($api_key, 0, 10) . '...' : 'NOT FOUND') . "\n";
+    #print "Models Found:\n";
+    #foreach my $model (@models) {
+    #    print "  - [$model]\n";
+    #}
+    #print "--- END DEBUG ---\n";
+
     return ($api_key, \@models);
+
 }
 
 ########################################################################
@@ -120,12 +166,30 @@ sub call_openrouter_api {
     my ($model_used);
 
     # --- Full Template Definitions ---
+    #$templates_ref = {
+    #    "precise"           => { "temperature" => 0.0, "top_p" => 0.1, "top_k" => 5 },
+    #    "balanced"          => { "temperature" => 0.5, "top_p" => 0.5, "top_k" => 30 },
+    #    "creative"          => { "temperature" => 1.0, "top_p" => 0.9, "top_k" => 50 },
+    #    # ... other templates from your library ...
+    #};
+
     $templates_ref = {
-        "precise"           => { "temperature" => 0.0, "top_p" => 0.1, "top_k" => 5 },
-        "balanced"          => { "temperature" => 0.5, "top_p" => 0.5, "top_k" => 30 },
-        "creative"          => { "temperature" => 1.0, "top_p" => 0.9, "top_k" => 50 },
-        # ... other templates from your library ...
+        "precise"          => {"temperature" => 0.0, "top_p" => 0.1, "top_k" => 5, "frequency_penalty" => 0.0, "presence_penalty" => 0.0, "repetition_penalty" => 1.1, "min_p" => 0.01},
+        "balanced"         => {"temperature" => 0.5, "top_p" => 0.5, "top_k" => 30, "frequency_penalty" => 0.3, "presence_penalty" => 0.3, "repetition_penalty" => 1.1},
+        "creative"         => {"temperature" => 1.0, "top_p" => 0.9, "top_k" => 50, "frequency_penalty" => 0.5, "presence_penalty" => 0.6, "repetition_penalty" => 1.0},
+        "brainstorm"       => {"temperature" => 1.5, "top_p" => 1.0, "top_k" => 100, "frequency_penalty" => 0.7, "presence_penalty" => 0.8, "repetition_penalty" => 1.0},
+        "summarization"    => {"temperature" => 0.3, "top_p" => 0.2, "top_k" => 10, "frequency_penalty" => 0.1, "presence_penalty" => 0.1, "repetition_penalty" => 1.0},
+        "Youtubeing" => {"temperature" => 0.3, "top_p" => 0.2, "top_k" => 10, "frequency_penalty" => 0.0, "presence_penalty" => 0.1, "repetition_penalty" => 1.1},
+        "dialogue"         => {"temperature" => 0.8, "top_p" => 0.9, "top_k" => 50, "frequency_penalty" => 0.6, "presence_penalty" => 0.7, "repetition_penalty" => 1.0},
+        "code_generation"  => {"temperature" => 0.2, "top_p" => 0.2, "top_k" => 10, "frequency_penalty" => 0.0, "presence_penalty" => 0.0, "repetition_penalty" => 1.0},
+        "paraphrasing"     => {"temperature" => 0.6, "top_p" => 0.7, "top_k" => 30, "frequency_penalty" => 0.5, "presence_penalty" => 0.5, "repetition_penalty" => 1.0},
+        "formal"           => {"temperature" => 0.3, "top_p" => 0.3, "top_k" => 20, "frequency_penalty" => 0.2, "presence_penalty" => 0.3, "repetition_penalty" => 1.0},
+        "casual"           => {"temperature" => 0.7, "top_p" => 0.8, "top_k" => 40, "frequency_penalty" => 0.4, "presence_penalty" => 0.5, "repetition_penalty" => 1.0},
+        "tech-heavy"       => {"temperature" => 0.1, "top_p" => 0.2, "top_k" => 5, "frequency_penalty" => 0.0, "presence_penalty" => 0.2, "repetition_penalty" => 1.0},
+        "inspirational"    => {"temperature" => 1.2, "top_p" => 1.0, "top_k" => 60, "frequency_penalty" => 0.6, "presence_penalty" => 0.7, "repetition_penalty" => 1.0},
+        "news_journalistic" => {"temperature" => 0.3, "top_p" => 0.4, "top_k" => 20, "frequency_penalty" => 0.1, "presence_penalty" => 0.2, "repetition_penalty" => 1.0}
     };
+
     $settings_ref = $templates_ref->{$template} // $templates_ref->{balanced};
 
     # --- HTTP Request Setup ---
@@ -286,6 +350,11 @@ sub call_llm {
     # --- Attempt API Calls Sequentially ---
     $final_response = '';
     foreach $model (@models_to_try) {
+
+        #print "Model: $model\n";
+        #print "Key: $api_key\n";
+        #print "Template: $template\n";
+
         $response = call_openrouter_api(
             prompt   => $prompt, api_key  => $api_key,
             models   => [$model], template => $template,
@@ -499,7 +568,6 @@ sub extract_text_between_tags {
 #   Returns an empty string ('') if the file cannot be opened or is empty.
 #
 ########################################################################
-
 # This subroutine requires the core Encode module for robust text decoding.
 sub read_file {
 
