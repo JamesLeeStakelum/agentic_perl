@@ -1,5 +1,6 @@
+
 use HTTP::Tiny;
-use JSON::PP;
+use JSON::XS (); # The empty parentheses () after the module name tell Perl to load the JSON::XS module but not to export any of its function names.
 use List::Util qw(shuffle);
 use Time::HiRes qw(sleep gettimeofday); # Added gettimeofday
 use POSIX qw(strftime);
@@ -199,7 +200,7 @@ sub call_openrouter_api {
         models   => $models_ref, # Use the provided list of models directly
         %{ $settings_ref }
     );
-    $json_payload = JSON::PP->new->utf8->encode(\%payload);
+    $json_payload = JSON::XS->new->utf8->encode(\%payload);
     $http = HTTP::Tiny->new(timeout => $timeout);
     %headers = (
         'Authorization' => "Bearer $api_key",
@@ -212,7 +213,7 @@ sub call_openrouter_api {
     for $attempt (1 .. $max_retries) {
         $response = $http->post($url, { headers => \%headers, content => $json_payload });
         if ($response->{success}) {
-            $decoded_response = eval { JSON::PP->new->utf8->decode($response->{content}) };
+            $decoded_response = eval { JSON::XS->new->utf8->decode($response->{content}) };
             if (!$@ && ref $decoded_response eq 'HASH' && ref($decoded_response->{choices}) eq 'ARRAY' && @{$decoded_response->{choices}}) {
                 $response_content = $decoded_response->{choices}->[0]->{message}->{content} // '';
                 $model_used = $decoded_response->{choices}->[0]->{model} // $models_ref->[0];
