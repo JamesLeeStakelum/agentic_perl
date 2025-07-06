@@ -1,4 +1,3 @@
-
 # Perl Code Style Guide: Readability & Portability First
 
 Our goal is to generate Perl code that is not just functional, but **exceptionally clear, easy to understand for humans, and straightforward to translate or port to other modern languages like Python.** This guide outlines the mandatory style preferences to achieve that.
@@ -13,6 +12,23 @@ Our goal is to generate Perl code that is not just functional, but **exceptional
 * **Minimize Dependencies:** Relying on core Perl features reduces setup complexity and increases portability.
 * **Robustness:** Avoiding complex regex patterns prevents common pitfalls with edge cases.
 * **Cross-Platform Compatibility:** Ensure generated code is robust and behaves predictably across Windows, macOS, and Linux environments.
+
+---
+
+## Core Architectural Mandates
+
+This section outlines the non-negotiable, high-level architectural principles that guide all design and generation decisions. These principles take precedence over all other style guidelines.
+
+### 1. Principle of Aggressive Decomposition
+
+**Guiding Principle: You MUST always prefer creating multiple, small, single-purpose files over creating a single, large, monolithic file or library.** This is a critical design constraint for the entire system.
+
+* **The "One File, One Core Purpose" Rule:** If a script requires more than two or three helper functions to accomplish its primary task, those helper functions **SHOULD** be broken out into their own separate library files and then imported.
+* **Rationale:** This approach is mandated for several reasons:
+    * **LLM Reliability:** LLMs are significantly more effective and less prone to error when generating small, focused files.
+    * **Testability:** Small, single-purpose files are easier to unit test with complete coverage.
+    * **Maintainability:** This paradigm makes it simpler for both humans and AI agents to debug, modify, and safely refactor the codebase.
+* **Example:** A script that performs a complex task requiring six helper functions should be broken into seven distinct files: the main script and six individual library files, one for each helper.
 
 ---
 
@@ -89,13 +105,31 @@ When generating Perl code, **you MUST strictly adhere to the following guideline
     * The goal is to keep the codebase minimal, reduce external dependencies, and simplify deployment and portability.
     * **ONLY use CPAN modules if a core Perl alternative is demonstrably more complex, less performant, or non-existent for a critical function.** If a CPAN module is absolutely necessary, it **must** be explicitly justified in comments.
 
-### 6. Regex Usage
+### 6. Strict Prohibition of Regular Expressions (Regex)
 
-* **Avoid Excessive or Unnecessary Regex**:
-    * **DO NOT** use complex or nested regular expressions for parsing, data extraction, or validation, especially when simpler string manipulation functions (like `substr`, `index`, `rindex`, `split`, `join`) would suffice.
-    * **Reasons**: Complex regex patterns are notoriously unreadable by humans and prone to unexpected failures due to unhandled edge cases.
-    * **Exception**: Simple substitution patterns are acceptable and encouraged for straightforward text transformations, such as `$text =~ s/pattern/replacement/g;`.
+**Guiding Principle: The use of regular expressions is strictly forbidden, with one narrow exception.** Experience has shown that regex is a primary source of bugs, maintenance issues, and code that is difficult to port.
 
+* **Forbidden Operations**: You **MUST NOT** use regular expressions for any matching, validation, capturing, or data extraction tasks. This includes, but is not limited to:
+    * The match operator: `if ($text =~ /some_pattern/)`
+    * Capturing in list context: `my @matches = ($text =~ /pattern/g)`
+    * The `split` function with a regex pattern: `split /[:,\s]+/, $string`
+
+* **Mandatory Alternatives**: For all the above tasks, you **MUST** use explicit and simple string manipulation functions, such as `index`, `rindex`, `substr`, and `split` (with a simple string delimiter).
+
+* **The Single Permitted Exception: Simple Substitution**: The *only* situation where a regex-like operation is permitted is for direct, simple, find-and-replace substitution using the `s///` operator.
+    * **Requirement**: The "find" pattern **MUST NOT** contain any advanced regex features like capturing groups, lookarounds, complex character classes, or quantifiers (e.g., `+`, `*`, `?`). It should function as a simple string literal search.
+    * **Acceptable Use**:
+        ```perl
+        # This is OK because it's a simple literal substitution.
+        my $find_string = 'some literal text';
+        my $replace_string = 'a new value';
+        $variable =~ s/$find_string/$replace_string/g;
+        ```
+    * **Unacceptable Use**:
+        ```perl
+        # FORBIDDEN: Uses a quantifier (+) and a character class (\s).
+        $variable =~ s/find\s+this/replace/g;
+        ```
 ### 7. File and Operating System Compatibility
 
 * **File Naming Conventions**: **ALWAYS** use **lowercase names for all files**. This ensures maximum portability across various operating systems, including case-sensitive filesystems on Linux/macOS and case-insensitive ones on Windows.
@@ -104,11 +138,311 @@ When generating Perl code, **you MUST strictly adhere to the following guideline
 * **Line Endings**: **ALWAYS** use **Unix-style line endings (`\n`) only** within the code. Your utility functions (`read_file`, `write_file`) are designed to handle system-specific newline conversions for I/O; **DO NOT** manually insert `\r\n` or assume specific line endings in your main logic.
 * **External Commands**: When using `system()` or similar, ensure the commands are universally available or explicitly handled by your `call_llm` abstraction. Assume a standard Windows command prompt environment (CMD/PowerShell compatible) for any direct system calls.
 
-### 8. General Readability and Maintainability
+### 8. Code Segmentation with Labeled Blocks
 
-* **Descriptive Naming**: Use clear, descriptive, and self-documenting names for all variables, subroutines, and constants (e.g., `$customer_id`, `process_order_data`, `MAX_RETRIES`).
+* **Purpose**: To facilitate targeted, AI-driven code modifications and improve human readability by clearly delineating logical blocks of code.
+* **Requirement**: Enclose distinct logical phases or complex sections of your code within clearly marked `BEGIN` and `END` comment blocks.
+* **Labeling Convention (Highly Recommended)**: **ALWAYS** use unique, descriptive names for block labels. The sequence of operations is defined by the block's physical order in the code, not by a number. This prevents maintenance issues when inserting or reordering blocks.
+    * **DO THIS (Descriptive Names)**:
+        ```perl
+        # --- BEGIN BLOCK: Read Input File ---
+        ...
+        # --- END BLOCK: Read Input File ---
+        ```
+    * **AVOID THIS (Sequential Integers)**:
+        ```perl
+        # --- BEGIN PHASE 1: Read File ---
+        # --- BEGIN PHASE 2: Process Data ---
+        ```
+        *Reason: This is brittle. Inserting a new phase between 1 and 2 would require renumbering all subsequent phases.*
+* **Granularity**: Apply these labels to sections that represent a complete, logical step in the program's workflow. Avoid labeling single lines or very small, trivial blocks.
+* **Benefit**: These markers act as unambiguous signposts, allowing a developer or an LLM to be instructed to "replace the code in the 'Validate Data Records' block," minimizing ambiguity and ensuring precision in automated or manual edits.
+
+### 9. Decompose Complexity with Atomic Subroutines
+
+**Guiding Principle: You MUST aggressively decompose complex operations into small, single-purpose helper subroutines.** Long, monolithic functions that perform multiple distinct tasks are strictly prohibited.
+
+* **The "One Job" Rule:** Every subroutine should do exactly one thing and do it well. If you can describe a subroutine's purpose using the word "and," it is likely doing too much and must be broken apart.
+    * *Incorrect:* A subroutine that "reads the configuration file **and** processes the data."
+    * *Correct:* A `read_config()` subroutine and a separate `process_data()` subroutine.
+* **Rationale:** Small, atomic functions are easier to read, test, debug, and reuse. For an AI agent, they are significantly easier to understand in isolation, modify without causing side effects, and verify for correctness.
+* **AVOID THIS (Monolithic Design):**
+    ```perl
+    sub process_sales_report {
+        my ($input_file, $output_file) = @_;
+        my @records;
+        my $total_sales = 0;
+
+        # Step 1: Read and parse the file
+        open my $fh, '<', $input_file or die "Cannot open $input_file: $!";
+        while (my $line = <$fh>) {
+            chomp $line;
+            my ($item, $price, $quantity) = split /,/, $line;
+            push @records, { item => $item, price => $price, quantity => $quantity };
+        }
+        close $fh;
+
+        # Step 2: Calculate total sales
+        for my $record (@records) {
+            $total_sales += $record->{price} * $record->{quantity};
+        }
+
+        # Step 3: Write the output
+        open my $out_fh, '>', $output_file or die "Cannot open $output_file: $!";
+        print $out_fh "Total Sales: $total_sales\n";
+        close $out_fh;
+    }
+    ```
+* **DO THIS (Decomposed, Atomic Design):**
+    ```perl
+    # --- BEGIN Helper: Read Sales Data ---
+    sub read_sales_data {
+        my ($input_file) = @_;
+        my @records;
+        open my $fh, '<', $input_file or die "Cannot open $input_file: $!";
+        while (my $line = <$fh>) {
+            chomp $line;
+            my ($item, $price, $quantity) = split /,/, $line;
+            push @records, { item => $item, price => $price, quantity => $quantity };
+        }
+        close $fh;
+        return \@records;
+    }
+    # --- END Helper: Read Sales Data ---
+
+    # --- BEGIN Helper: Calculate Total ---
+    sub calculate_total_sales {
+        my ($records_ref) = @_;
+        my $total = 0;
+        for my $record (@$records_ref) {
+            $total += $record->{price} * $record->{quantity};
+        }
+        return $total;
+    }
+    # --- END Helper: Calculate Total ---
+
+    # --- BEGIN Helper: Write Report ---
+    sub write_sales_report {
+        my ($total, $output_file) = @_;
+        open my $out_fh, '>', $output_file or die "Cannot open $output_file: $!";
+        print $out_fh "Total Sales: $total\n";
+        close $out_fh;
+    }
+    # --- END Helper: Write Report ---
+
+    # --- BEGIN Main Logic ---
+    sub process_sales_report {
+        my ($input_file, $output_file) = @_;
+
+        my $records_ref = read_sales_data($input_file);
+        my $total_sales = calculate_total_sales($records_ref);
+        write_sales_report($total_sales, $output_file);
+    }
+    # --- END Main Logic ---
+    ```
+
+### 10. General Readability and Maintainability
+
+* **Descriptive Naming**: Use clear, descriptive, and self-documenting names for all variables, subroutines, and constants.
 * **Concise Comments**: Include concise comments to explain any non-obvious logic, complex algorithms, or crucial design choices.
 * **Consistent Formatting**: Maintain consistent indentation and overall code formatting throughout the generated code.
 * **Single Responsibility**: Keep subroutines focused on a single, well-defined responsibility.
 
+### **11. Proactive Crash Prevention and Error Handling**
+
+This is the most critical section for creating robust applications. The guiding principle is to **never trust that an operation will succeed**. Always assume an operation can fail and write code to handle that failure gracefully.
+
+#### **A. The Primary Tool for Fatal Errors: The `eval` Block**
+
+Any operation that is documented to `die` (terminate the script) on failure **MUST** be wrapped in an `eval` block. This allows you to "catch" a fatal error and handle it without crashing.
+
+**How to Use `eval` Correctly:**
+
+1.  Place the potentially failing code inside `eval { ... };`.
+2.  **Immediately** after the `eval` block, check the special variable `$@`.
+3.  If `$@` is true, it contains the error message from the `die` command. Your code can then log this error and execute a backup plan.
+4.  If `$@` is false, the code inside the `eval` block succeeded.
+
+#### **B. Common Scenarios Requiring `eval`**
+
+Here are real-world examples where `eval` is mandatory:
+
+**1. File I/O (`open`)**
+
+  * **Risk:** `open` can `die` if a file cannot be opened for reasons like permissions errors or a full disk.
+  * **Safe Implementation:**
+    ```perl
+    my $fh;
+    my $is_successful = 1;
+    eval {
+        open $fh, '>', $output_file or die "Cannot open '$output_file': $!";
+    };
+    if ($@) {
+        # Log the error contained in $@ and set a failure flag
+        $is_successful = 0;
+    }
+    ```
+
+**2. Data Decoding (`Encode::decode`)**
+
+  * **Risk:** `decode` will `die` if it encounters byte sequences that are invalid for the specified encoding (e.g., malformed UTF-8).
+  * **Safe Implementation:**
+    ```perl
+    use Encode;
+    my $decoded_string;
+    eval {
+        $decoded_string = decode('UTF-8', $raw_byte_string);
+    };
+    if ($@) {
+        # The data was corrupt. Assign a safe default and maybe log the error.
+        $decoded_string = '';
+    }
+    ```
+
+**3. Database Connections and Queries**
+
+  * **Risk:** A database connection (`DBI->connect`) can `die` if the credentials are wrong, the server is down, or a network issue occurs. Queries can also fail.
+  * **Safe Implementation:**
+    ```perl
+    use DBI;
+    my $dbh; # Database handle
+    eval {
+        $dbh = DBI->connect($dsn, $user, $password, { RaiseError => 1, PrintError => 0 });
+    };
+    if ($@) {
+        # Connection failed. Return undef so the calling code knows it failed.
+        return undef;
+    }
+    ```
+
+#### **C. Preventing Logic Crashes with Defensive Checks**
+
+Many crashes are not from `die` but from logical errors, like using an undefined variable. These **MUST** be prevented with conditional checks.
+
+**1. Dereferencing `undef`**
+
+  * **Risk:** Trying to access a hash or array key on a variable that is `undef` is a fatal error.
+  * **Prevention:** **ALWAYS** check if a variable is defined before you dereference it.
+    ```perl
+    # The function might return undef if the user is not found
+    my $user_ref = find_user_by_id(123);
+    my $user_name;
+
+    # DO THIS: Check first!
+    if (defined $user_ref) {
+        $user_name = $user_ref->{name};
+    }
+
+    # AVOID THIS: This will crash if $user_ref is undef
+    # my $user_name = $user_ref->{name};
+    ```
+
+**2. Division by Zero**
+
+  * **Risk:** Attempting to divide by zero is a fatal error.
+  * **Prevention:** **ALWAYS** check that a denominator is not zero before dividing.
+    ```perl
+    my $result = 0; # Default value
+    if ($denominator != 0) {
+        $result = $numerator / $denominator;
+    }
+    ```
+
+-----
+
+### 12\. Document Logic with Inline Step-by-Step Comments
+
+**Guiding Principle: You MUST narrate the logic within a subroutine by placing a concise comment before each distinct operational step.** Long functions without internal comments are prohibited.
+
+  * **Purpose**: These comments act as a "table of contents" for the subroutine's logic. They make the code's narrative flow immediately obvious and provide unambiguous targets for future automated or manual edits.
+
+  * **Requirement**: Before a block of code that performs a specific action (e.g., initializing variables, reading a file, looping through data, formatting output), add a single-line comment that describes that action.
+
+  * **DO THIS (Narrated Logic):**
+
+    ```perl
+    sub process_user_data {
+        my ($user_id, $config_ref) = @_;
+
+        # --- Initialize variables ---
+        my $user_record_ref;
+        my $output_string = '';
+        my $is_valid = 0;
+
+        # --- Fetch the user record from the database ---
+        $user_record_ref = get_user_from_db($user_id);
+
+        # --- Validate the fetched record ---
+        if (defined $user_record_ref) {
+            $is_valid = 1;
+        }
+
+        # --- Format the output string based on validity ---
+        if ($is_valid) {
+            my $user_name = $user_record_ref->{name};
+            $output_string = "User: " . $user_name;
+        } else {
+            $output_string = "Invalid user";
+        }
+
+        # --- Return the final result ---
+        return $output_string;
+    }
+    ```
+
+  * **AVOID THIS (Undocumented Logic Block):**
+
+    ```perl
+    sub process_user_data {
+        my ($user_id, $config_ref) = @_;
+
+        my $user_record_ref;
+        my $output_string = '';
+        my $is_valid = 0;
+
+        $user_record_ref = get_user_from_db($user_id);
+
+        if (defined $user_record_ref) {
+            $is_valid = 1;
+        }
+
+        if ($is_valid) {
+            my $user_name = $user_record_ref->{name};
+            $output_string = "User: " . $user_name;
+        } else {
+            $output_string = "Invalid user";
+        }
+
+        return $output_string;
+    }
+
+---
+
+### 13. **Mandatory Logging & Debugging Requirements:**
+
+Your generated script MUST be debug-friendly. To achieve this, you must implement a "verbose mode" by following these rules precisely:
+
+1.  **Accept a Verbose Flag:** The script MUST accept a command-line flag: `--verbose`.
+
+2.  **Implement a Verbose Switch:** At the beginning of the script, check if the `--verbose` flag was provided and store the result in a boolean variable (e.g., `my $is_verbose = 0;` in Perl, or `is_verbose = False` in Python).
+
+3.  **Add Step-by-Step Logging:** Before and after every major logical step, you MUST insert a conditional print statement that only executes if the verbose flag is active. Major steps include:
+    * Opening or closing a file.
+    * Starting or ending a major loop.
+    * Making an external API or script call.
+    * Connecting to or disconnecting from a database.
+    * Any significant data transformation.
+
+4.  **Logging Format:** All verbose output messages MUST be printed to STDOUT and begin with `-> ` to make them easy to identify. For example: `-> Reading configuration from file...`
+
+5.  **Default to Silent:** If the `--verbose` flag is NOT provided, the script MUST run silently and produce no output other than its primary result or any critical errors.
+
+---
+### 14. Rule of Complete Regeneration
+
+**Guiding Principle: You MUST NEVER use placeholders or summarizations when revising a document or code file.**
+
+* When asked to make a change, you MUST regenerate the **entire, complete text** of the new version from beginning to end.
+* Placeholders such as `...`, `// the rest of the function is unchanged`, or `[existing code]` are strictly forbidden.
+* **Violation of this rule constitutes a critical failure.**
 ---
